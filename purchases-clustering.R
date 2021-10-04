@@ -8,6 +8,8 @@ library(readr)
 library(stringr)
 library(dplyr)
 library(ggQC)
+library(fastDummies)
+library(cluster)
 
 ##data reading
 #reading structure from data
@@ -112,8 +114,16 @@ head(dt[ , .N, TRANS_CAC_DESC_1][order(N, decreasing = TRUE)], 20)
 (gt5pct <- dt[ , .N, TRANS_CAC_DESC_1][order(N, decreasing = TRUE)][N > 0.05*nrow(dt), ][ , TRANS_CAC_DESC_1])
 dt[!dt[ , TRANS_CAC_DESC_1] %in% gt5pct, TRANS_CAC_DESC_1 := 'other']
 
+#we show the 10 most frequent directorate
+dt[ , DIRECTORATE := toupper(DIRECTORATE)]
+head(dt[ , .N, DIRECTORATE][order(N, decreasing = TRUE)], 10)
 
-##feature engineering
+#we keep the groups with more than 5% of total transactions and the rest is grouped in a bag
+(gt5pct <- dt[ , .N, DIRECTORATE][order(N, decreasing = TRUE)][N > 0.05*nrow(dt), ][ , DIRECTORATE])
+dt[!dt[ , DIRECTORATE] %in% gt5pct, DIRECTORATE := 'other']
+head(dt[ , .N, DIRECTORATE][order(N, decreasing = TRUE)], 10)
+
+##feature engineering trx-level
 #we just have 6 columns and one is the key (card_number) so just 5 features, we need to create more in order to make clusters
 #extract the day as a variable
 dt[ , DAY := as.numeric(substr(x = TRANS_DATE, start = 9, stop = 10))]
@@ -155,6 +165,53 @@ dt[ , WEEKEND_TRX := ifelse(WEEKDAY %in% weekend.days, 1, 0)]
 
 summary(dt)
 
+##feature engineering client-level
+#we are going to create features grouping information by client
+#first, we need to create dummies from the categorical variables
+cols.for.dummy <- c('MERCHANT_NAME', 'TRANS_CAC_DESC_1', 'DIRECTORATE', 'WEEKDAY')
+dt.dummies <- dummy_cols(dt, select_columns = cols.for.dummy) #, remove_selected_columns = TRUE)
+summary(dt.dummies)
 
 
+getmode <- function(x) {
+  uniqv <- unique(x)
+  uniqv[which.max(tabulate(match(x, uniqv)))]
+}
 
+dt.grouped <- dt.dummies[ , .(NUM_TRX = .N, AVG_TRX = mean(POSITIVE_AMT), 
+                MAX_TRX = max(POSITIVE_AMT), NUM_CHARGEBACKS = sum(CHARGEBACK),
+                PCT_CHARGEBACKS = sum(CHARGEBACK)/.N, 
+                AVG_AMT_CHARGEBACKS = mean(POSITIVE_AMT*CHARGEBACK),
+                PCT_AMT_CHARGEBACKS = sum(POSITIVE_AMT*CHARGEBACK)/sum(POSITIVE_AMT),
+                NUM_OUTLIER = sum(OUTLIER), PCT_OUTLIER = sum(OUTLIER)/.N,
+                NUM_XTRM_VALUE = sum(EXTREME_VALUE), PCT_XTRM_VALUE = sum(EXTREME_VALUE)/.N,
+                NUM_TAIL_VALUE = sum(TAIL_VALUE), PCT_TAIL_VALUE = sum(TAIL_VALUE)/.N,
+                NUM_OTM = sum(OTM), PCT_OTM = sum(OTM)/.N, 
+                NUM_PAYDAY_TRX = sum(PAYDAY_TRX), PCT_PAYDAY_TRX = sum(PAYDAY_TRX)/.N,
+                NUM_WEEKEND_TRX = sum(WEEKEND_TRX), PCT_WEEKEND_TRX = sum(WEEKEND_TRX)/.N,
+                MODE_MERCHANT = as.factor(getmode(MERCHANT_NAME)), 
+                MODE_CAC_1 = as.factor(getmode(TRANS_CAC_DESC_1)),
+                MODE_DIRECT = as.factor(getmode(DIRECTORATE)), 
+                MODE_DAY = as.factor(getmode(DAY)), 
+                MODE_MONTH = as.factor(getmode(MONTH))), 
+                CARD_NUMBER]
+
+summary(dt.grouped)
+
+key <- dt.grouped[ , CARD_NUMBER]
+dt.grouped[ , CARD_NUMBER := NULL]
+
+set.seed(100)
+gower_dist <- daisy(as.data.frame(dt.grouped),
+                    metric = "gower")
+
+km <- kmeans(x = gower_dist, centers = 5)
+km$size
+prop.table(km$size)
+
+cols.for.dummy.2 <- c('MODE_MERCHANT', 'MODE_CAC_1', 'MODE_DIRECT', 'MODE_DAY', 'MODE_MONTH')
+dt.dummies.2 <- dummy_cols(dt.grouped, select_columns = cols.for.dummy.2, remove_selected_columns = TRUE)
+
+data.temp <- cbind(dt.dummies.2, cluster = km$cluster)
+
+data.temp[ , lapply(.SD, mean), cluster][order(cluster)]
