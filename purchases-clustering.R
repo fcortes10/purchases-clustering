@@ -7,6 +7,7 @@ library(plyr)
 library(readr)
 library(stringr)
 library(dplyr)
+library(ggQC)
 
 ##data reading
 #reading structure from data
@@ -56,7 +57,7 @@ dt[which(is.na(as.numeric(dt[ , ORIGINAL_GROSS_AMT])))]
 #it is the thousands separator, we replace it and cast again as numeric
 dt[ , ORIGINAL_GROSS_AMT := as.numeric(gsub(",", "", ORIGINAL_GROSS_AMT))]
 
-#data exploration
+##data exploration
 #we explore our only numeric variable
 hist(dt[ , ORIGINAL_GROSS_AMT])
 
@@ -109,18 +110,48 @@ head(dt[ , .N, TRANS_CAC_DESC_1][order(N, decreasing = TRUE)], 20)
 
 #we keep the groups with more than 5% of total transactions and the rest is grouped in a bag
 (gt5pct <- dt[ , .N, TRANS_CAC_DESC_1][order(N, decreasing = TRUE)][N > 0.05*nrow(dt), ][ , TRANS_CAC_DESC_1])
+dt[!dt[ , TRANS_CAC_DESC_1] %in% gt5pct, TRANS_CAC_DESC_1 := 'other']
 
 
-
-hist(dt[ , DAY])
-dt[ , .N, WEEKDAY]
-#feature engineering
-
+##feature engineering
+#we just have 6 columns and one is the key (card_number) so just 5 features, we need to create more in order to make clusters
 #extract the day as a variable
 dt[ , DAY := as.numeric(substr(x = TRANS_DATE, start = 9, stop = 10))]
 
 #extract the weekday as a variable
 dt[ , WEEKDAY := weekdays(dt[ , TRANS_DATE])]
+
+#extract the months as a variable
+dt[ , MONTH := as.numeric(substr(x = TRANS_DATE, start = 6, stop = 7))]
+
+#chargebacks
+dt[ , CHARGEBACK := ifelse(ORIGINAL_GROSS_AMT < 0, 1, 0)]
+
+#amounts to positive
+dt[ , POSITIVE_AMT := ifelse(CHARGEBACK == 1, -1*ORIGINAL_GROSS_AMT, ORIGINAL_GROSS_AMT)]
+
+#outliers
+iqr <- quantile(dt[ , POSITIVE_AMT], probs = c(0.25, 0.75))
+dt[ , OUTLIER := ifelse(!between(POSITIVE_AMT, iqr[1]-1.5*QCrange(iqr), iqr[2]+1.5*QCrange(iqr)), 1, 0)]
+
+#extreme values
+dt[ , EXTREME_VALUE := ifelse(!between(POSITIVE_AMT, iqr[1]-3*QCrange(iqr), iqr[2]+3*QCrange(iqr)), 1, 0)]
+
+#tail values
+tails <- quantile(dt[ , POSITIVE_AMT], probs = c(0.025, 0.975))
+dt[ , TAIL_VALUE := ifelse(!between(POSITIVE_AMT, tails[1], tails[2]), 1, 0)]
+
+#over the median (otm)
+median.value <- median(dt[ , POSITIVE_AMT])
+dt[ , OTM := ifelse(POSITIVE_AMT > median.value, 1, 0)]
+
+#transactions around payday
+paydays <- c(1, 2, 14, 15, 16, 28, 29, 30, 31)
+dt[ , PAYDAY_TRX := ifelse(DAY %in% paydays, 1, 0)]
+
+#transactions on weekends
+weekend.days <- c('Saturday', 'Sunday')
+dt[ , WEEKEND_TRX := ifelse(WEEKDAY %in% weekend.days, 1, 0)]
 
 summary(dt)
 
