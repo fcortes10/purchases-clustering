@@ -202,6 +202,7 @@ dt.grouped <- dt.dummies[ , .(NUM_TRX = .N, AVG_TRX = mean(POSITIVE_AMT),
 
 summary(dt.grouped)
 
+
 key <- dt.grouped[ , CARD_NUMBER]
 dt.grouped[ , CARD_NUMBER := NULL]
 

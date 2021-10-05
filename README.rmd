@@ -8,7 +8,7 @@ knitr::opts_chunk$set(echo = TRUE)
   
 ***
 
-> This report is just for academical purposes
+> This report is just for assessment purposes
 
 *by Fernando Cortés Tejada* | [linkedin](https://www.linkedin.com/in/fernando-cortes-tejada/) | [github](https://github.com/fcortes10)
 
@@ -25,9 +25,19 @@ We chose to approach this problem with `R` instead of `python` because the most 
 ***
 
 ## Index
-[1. Data reading](#data-reading)  
-[2. Data cleaning](#data-cleaning)  
-[3. Data exploration](#data-exploration)
+1. [Data reading](#data-reading)  
+2. [Data cleaning](#data-cleaning)  
+3. [Data exploration](#data-exploration)
+4. [Feature engineering](#feature-engineering)  
+    + [Transaction level](#transaction-level)
+    + [Client level](#client-level)  
+5. [Clustering and anomalies detection](#clustering-and-anomalies-detection)  
+    + [Number of clusters (K)](#number-of-clusters-k)  
+    + [Clustering](#clustering)  
+    + [Anomalies detection](#anomalies-detection)  
+    + [New number of clusters (K)](#new-number-of-clusters-k)  
+    + [New clustering](#new-clustering)  
+6. [Interpretation and conclusions](#interpretation-and-conclusions)
 
 ***
 
@@ -53,8 +63,10 @@ library(mclust)
 library(xgboost)
 ```
 
+([back to index](#index))
+
 ***
-### Data reading
+### Data reading  
 
 Then we read the data structure, get all files from the `data-csv` folder, also [here](https://github.com/fcortes10/purchases-clustering/tree/main/data-csv), standardize column names and append all datasets into a big one called `dt`.
 
@@ -85,6 +97,7 @@ Now we can have an overview of how the dataset looks like (just the 3 first rows
 head(dt, 3)
 ```
 
+([back to index](#index))
 
 ***
 ### Data cleaning
@@ -136,6 +149,8 @@ we can see it is the thousands separator. So we replace the character `","` in t
 #it is the thousands separator, we replace it and cast again as numeric
 dt[ , ORIGINAL_GROSS_AMT := as.numeric(gsub(",", "", ORIGINAL_GROSS_AMT))]
 ```
+
+([back to index](#index))
 
 ***
 ### Data exploration
@@ -195,28 +210,40 @@ Then, we continue with the 20 most frequent `MERCHANT_NAME`
 head(dt[ , .N, MERCHANT_NAME][order(N, decreasing = TRUE)], 20)
 ```
 
+where we see that amazon has more than 5 variations in its name, so we group it
 
-```{r}
-#we see that amazon has more than 5 variations in its name, so we group it
+```{r amazon}
 dt[grepl('amazon', tolower(dt[ , MERCHANT_NAME])), MERCHANT_NAME := 'amazon']
+```
 
-#we do the same for other similar cases
+and we do the same for other similar cases.
+
+```{r grouping_merchants}
 dt[grepl('asda', tolower(dt[ , MERCHANT_NAME])), MERCHANT_NAME := 'asda']
 dt[grepl('travelodge', tolower(dt[ , MERCHANT_NAME])), MERCHANT_NAME := 'travelodge']
 dt[grepl('argos', tolower(dt[ , MERCHANT_NAME])), MERCHANT_NAME := 'argos']
+```
 
-#everything else below 500 trx is grouped in a bag
-head(dt[ , .N, MERCHANT_NAME][order(N, decreasing = TRUE)], 20)
+We just keep the common merchants and everything else is grouped in a bag to reduce categories.
+
+```{r merchants_bag}
+head(dt[ , .N, MERCHANT_NAME][order(N, decreasing = TRUE)], 10)
 common.merchants <- c('amazon', 'travelodge', 'asda', 'argos', 'post office counter')
 dt[!dt[ , MERCHANT_NAME] %in% common.merchants, MERCHANT_NAME := 'other']
+```
 
+We do the same for `TRANS_CAC_DESC_1` and `DIRECTORATE` but we define a threshold of 5% not to put the category in a bag.
+
+```{r casc_1}
 #we show the 20 most frequent desc 1
 head(dt[ , .N, TRANS_CAC_DESC_1][order(N, decreasing = TRUE)], 20)
 
 #we keep the groups with more than 5% of total transactions and the rest is grouped in a bag
 (gt5pct <- dt[ , .N, TRANS_CAC_DESC_1][order(N, decreasing = TRUE)][N > 0.05*nrow(dt), ][ , TRANS_CAC_DESC_1])
 dt[!dt[ , TRANS_CAC_DESC_1] %in% gt5pct, TRANS_CAC_DESC_1 := 'other']
+```
 
+```{r directorate}
 #we show the 10 most frequent directorate
 dt[ , DIRECTORATE := toupper(DIRECTORATE)]
 head(dt[ , .N, DIRECTORATE][order(N, decreasing = TRUE)], 10)
@@ -227,3 +254,159 @@ dt[!dt[ , DIRECTORATE] %in% gt5pct, DIRECTORATE := 'other']
 head(dt[ , .N, DIRECTORATE][order(N, decreasing = TRUE)], 10)
 ```
 
+([back to index](#index))
+
+***
+### Feature engineering
+
+We have divided the feature engineering in two groups: transaction level and client level.
+
+#### Transaction level
+
+We just have 6 columns and one is the key column (card_number) so just 5 features. Thus, we need to create more features in order to make clusters and find profiles.
+
+Let's begin by extracting the day, weekday and month as variables.
+
+```{r day_week_month}
+#extract the day as a variable
+dt[ , DAY := as.numeric(substr(x = TRANS_DATE, start = 9, stop = 10))]
+
+#extract the weekday as a variable
+dt[ , WEEKDAY := weekdays(dt[ , TRANS_DATE])]
+
+#extract the months as a variable
+dt[ , MONTH := as.numeric(substr(x = TRANS_DATE, start = 6, stop = 7))]
+```
+
+We create the `CHARGEBACK` feature, which tells us if the transaction amount is negative (a return) 
+
+```{r chargeback}
+#chargebacks
+dt[ , CHARGEBACK := ifelse(ORIGINAL_GROSS_AMT < 0, 1, 0)]
+```
+
+and with that we change all amounts to positive.
+
+```{r positive_amt}
+#amounts to positive
+dt[ , POSITIVE_AMT := ifelse(CHARGEBACK == 1, -1*ORIGINAL_GROSS_AMT, ORIGINAL_GROSS_AMT)]
+```
+
+We also create binary features that indicate us if the transaction amount is an outlier, an extreme value, is a tail value or is over the median.
+
+```{r outlier_ext}
+#outliers
+iqr <- quantile(dt[ , POSITIVE_AMT], probs = c(0.25, 0.75))
+dt[ , OUTLIER := ifelse(!between(POSITIVE_AMT, iqr[1]-1.5*QCrange(iqr), iqr[2]+1.5*QCrange(iqr)), 1, 0)]
+
+#extreme values
+dt[ , EXTREME_VALUE := ifelse(!between(POSITIVE_AMT, iqr[1]-3*QCrange(iqr), iqr[2]+3*QCrange(iqr)), 1, 0)]
+
+#tail values
+tails <- quantile(dt[ , POSITIVE_AMT], probs = c(0.025, 0.975))
+dt[ , TAIL_VALUE := ifelse(!between(POSITIVE_AMT, tails[1], tails[2]), 1, 0)]
+
+#over the median (otm)
+median.value <- median(dt[ , POSITIVE_AMT])
+dt[ , OTM := ifelse(POSITIVE_AMT > median.value, 1, 0)]
+```
+
+Now we create two more binary features related to transactions made around the payday or on weekends.
+
+```{r payday_weekend}
+#transactions around payday
+paydays <- c(1, 2, 14, 15, 16, 28, 29, 30, 31)
+dt[ , PAYDAY_TRX := ifelse(DAY %in% paydays, 1, 0)]
+
+#transactions on weekends
+weekend.days <- c('Saturday', 'Sunday')
+dt[ , WEEKEND_TRX := ifelse(WEEKDAY %in% weekend.days, 1, 0)]
+```
+
+We see a summary with the new features.
+
+```{r summary_trx}
+summary(dt)
+```
+
+([back to index](#index))
+
+#### Client level
+
+Based on what we have just engineered at the transaction level, we begin to create features by grouping the information by client. 
+
+First, we need to create dummies from the categorical variables.
+
+```{r dummy_engineering}
+#select columns to make dummies
+cols.for.dummy <- c('MERCHANT_NAME', 'TRANS_CAC_DESC_1', 'DIRECTORATE', 'WEEKDAY')
+dt.dummies <- dummy_cols(dt, select_columns = cols.for.dummy)
+```
+
+
+Then we start grouping by client and creating new features. These new features include averages, totals, sums, maximums, percentages, ratios and modes.
+
+```{r group_eng}
+#declare the statistical mode function (since R doesn't have one)
+getmode <- function(x) {
+  uniqv <- unique(x)
+  uniqv[which.max(tabulate(match(x, uniqv)))]
+}
+
+#group by client
+dt.grouped <- dt.dummies[ , .(NUM_TRX = .N, AVG_TRX = mean(POSITIVE_AMT), 
+                MAX_TRX = max(POSITIVE_AMT), NUM_CHARGEBACKS = sum(CHARGEBACK),
+                PCT_CHARGEBACKS = sum(CHARGEBACK)/.N, 
+                AVG_AMT_CHARGEBACKS = mean(POSITIVE_AMT*CHARGEBACK),
+                PCT_AMT_CHARGEBACKS = sum(POSITIVE_AMT*CHARGEBACK)/sum(POSITIVE_AMT),
+                NUM_OUTLIER = sum(OUTLIER), PCT_OUTLIER = sum(OUTLIER)/.N,
+                NUM_XTRM_VALUE = sum(EXTREME_VALUE), PCT_XTRM_VALUE = sum(EXTREME_VALUE)/.N,
+                NUM_TAIL_VALUE = sum(TAIL_VALUE), PCT_TAIL_VALUE = sum(TAIL_VALUE)/.N,
+                NUM_OTM = sum(OTM), PCT_OTM = sum(OTM)/.N, 
+                NUM_PAYDAY_TRX = sum(PAYDAY_TRX), PCT_PAYDAY_TRX = sum(PAYDAY_TRX)/.N,
+                NUM_WEEKEND_TRX = sum(WEEKEND_TRX), PCT_WEEKEND_TRX = sum(WEEKEND_TRX)/.N,
+                MODE_MERCHANT = as.factor(getmode(MERCHANT_NAME)), 
+                MODE_CAC_1 = as.factor(getmode(TRANS_CAC_DESC_1)),
+                MODE_DIRECT = as.factor(getmode(DIRECTORATE)), 
+                MODE_DAY = as.factor(getmode(DAY)), 
+                MODE_MONTH = as.factor(getmode(MONTH))), 
+                CARD_NUMBER]
+
+
+```
+
+Finally, we see a summary of the new client-level features.
+
+```{r summary_group}
+summary(dt.grouped)
+```
+
+([back to index](#index))
+
+***
+### Clustering and anomalies detection
+
+#### Number of clusters (K)
+
+([back to index](#index))
+
+#### Clustering
+
+([back to index](#index))
+
+#### Anomalies detection
+
+([back to index](#index))
+
+#### New number of clusters (K)
+
+([back to index](#index))
+
+#### New clustering
+
+([back to index](#index))
+
+***
+### Interpretation and conclusions
+
+([back to index](#index))
