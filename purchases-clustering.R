@@ -250,8 +250,6 @@ dt.dummies.2 <- dummy_cols(dt.grouped, select_columns = cols.for.dummy.2, remove
 #we bind the "target" column which is the cluster (1 and 2) converted to 0 and 1
 dt.sup <- cbind(dt.dummies.2, cluster = km$cluster-1)
 
-#data.temp[ , lapply(.SD, mean), cluster][order(cluster)]
-
 #we train a classification model, in this case it is a binary classification since we have 2 clusters
 #but in order to make it for general purposes (more than 2 clusters)
 #we train a multinomial xgboost model
@@ -289,36 +287,128 @@ bst_model <- xgb.train(params = xgb_params,
 #we plot the top 10 variables
 importance <- xgb.importance(feature_names = colnames(train_matrix), model = bst_model)
 xgb.plot.importance(importance_matrix = importance, top_n = 10, measure = 'Frequency')
-head(importance[order(Frequency, decreasing = TRUE)], 10)[ , Feature]
+(imp_features <- head(importance[order(Frequency, decreasing = TRUE)], 10)[ , Feature])
 
+imp_features <- c(imp_features, 'cluster')
+#we use these features to see what characterizes the clusters
+dt.sup[ , ..imp_features][ , lapply(.SD, mean), cluster][order(cluster)]
 
-dt.grouped.2 <- dt.grouped[km$cluster == 1]
+#we can see a lot of difference in 
+#pct_chargebacks, with the cluster 1 with more than 80% negative trx
+#avg_trx, with a ticket per transaction of over 100 times the cluster 0
+#pct_outlier, more than 80% of trx amt qualified as outliers
+#mode_month_5, in 76% of cases the month with most trx was may (wierd)
 
+#card numbers from people that have their trx mode on may
+index <- which((dt.sup[ , MODE_MONTH_5] == 1) & unname(km$cluster-1 == 1))
+anomaly_card_number <- key[index]
+
+#transaction dates of that clients
+table(dt[CARD_NUMBER %in% anomaly_card_number, TRANS_DATE])
+#all their trx are placed on may, none other month and it is their only trx in the whole year
+#it could be a fraud attack or maybe a promotion on that exact date
+#but what it is for sure is an anomaly
+
+#since this anomaly affect the clustering we were trying to make
+#we take them off and start over
+dt.grouped.2 <- dt.grouped[km$cluster-1 != 1]
+
+#we create a distance/dissimilarity matrix
+set.seed(100)
 gower_dist.2 <- daisy(as.data.frame(dt.grouped.2),
-                    metric = "gower")
+                      metric = "gower")
 
-silhouette_score <- function(k){
-  km <- kmeans(x = gower_dist.2, centers = k, nstart=10)
-  ss <- silhouette(km$cluster, dist(gower_dist.2))
-  mean(ss[, 3])
-}
-k <- 2:6
-avg_sil <- sapply(k, silhouette_score)
-plot(k, type='b', avg_sil, xlab='Number of clusters', ylab='Average Silhouette Scores', frame=FALSE)
+#silhouette method
+k <- 2:7
+avg_sil <- sapply(k, silhouette_score, gower_dist.2)
+plot(k, type = 'b', avg_sil, xlab = 'Number of clusters', ylab = 'Average Silhouette Scores', frame = FALSE)
+#peak 2 (high) and 3 (2nd high)
 
-fviz_nbclust(dist(gower_dist), kmeans, method = "silhouette")
+#elbow method
+k <- 1:7
+wss_values <- map_dbl(k, wss, gower_dist.2)
 
-
-wss <- function(k) {
-  kmeans(gower_dist.2, k, nstart = 10)$tot.withinss
-}
-
-k.values <- 1:7
-
-wss_values <- map_dbl(k.values, wss)
-
-plot(k.values, wss_values,
+plot(k, wss_values,
      type="b", pch = 19, frame = FALSE, 
      xlab="Number of clusters K",
      ylab="Total within-clusters sum of squares")
+#inflection points at 3 (high)
 
+#just like before, the second highest clusters where k=4, now that we removed 1
+#cluster, both of our analysis combined give us k=3
+
+#we proceed to use K=3
+km <- kmeans(x = gower_dist.2, centers = 3)
+km$size
+prop.table(km$size)
+#now the clusters are more balanced, probably indicating different profiles
+
+#in order to know with variables are the most important in determining the cluster belonging we train a supervised model
+#first we must convert categorical variables into dummies
+cols.for.dummy.2 <- c('MODE_MERCHANT', 'MODE_CAC_1', 'MODE_DIRECT', 'MODE_DAY', 'MODE_MONTH')
+dt.dummies.2 <- dummy_cols(dt.grouped.2, select_columns = cols.for.dummy.2, remove_selected_columns = TRUE)
+
+#we bind the "target" column which is the cluster (1 and 2) converted to 0 and 1
+dt.sup <- cbind(dt.dummies.2, cluster = km$cluster-1)
+
+#we train a classification model, in this case it is a binary classification since we have 2 clusters
+#but in order to make it for general purposes (more than 2 clusters)
+#we train a multinomial xgboost model
+
+#number of classes
+k <- length(km$size)
+#definition of the multinomial model
+xgb_params <- list("objective" = "multi:softprob",
+                   "eval_metric" = "mlogloss",
+                   "num_class" = k)
+#number of iterations
+nround <- 500 
+#number of folds for the cross validation
+cv.nfold <- 5
+
+#we declare the train data matrix
+train_matrix <- xgb.DMatrix(data = as.matrix(dt.sup[ , -80]), label = dt.sup$cluster)
+
+#we do a cross validation to get the best iteration parameter
+set.seed(5)
+cv_model <- xgb.cv(params = xgb_params,
+                   data = train_matrix, 
+                   nrounds = nround,
+                   nfold = cv.nfold,
+                   verbose = TRUE,
+                   prediction = TRUE,
+                   early_stopping_rounds = 50)
+
+#we train the xgboost with the best number of iterations
+set.seed(10)
+bst_model <- xgb.train(params = xgb_params,
+                       data = train_matrix,
+                       nrounds = cv_model$best_iteration)
+
+#we plot the top 10 variables
+importance <- xgb.importance(feature_names = colnames(train_matrix), model = bst_model)
+xgb.plot.importance(importance_matrix = importance, top_n = 15, measure = 'Frequency')
+(imp_features <- head(importance[order(Frequency, decreasing = TRUE)], 15)[ , Feature])
+
+imp_features <- c(imp_features, 'cluster')
+#we use these features to see what characterizes the clusters
+round(dt.sup[ , ..imp_features][ , lapply(.SD, mean), cluster][order(cluster)], 2)
+
+#cluster 1 
+#steady transactions (no outliers), 63% over the median but the lowest avg ticket
+#it doesnt have a high amount trx and 77% of trx is on fuel 
+#no amount in education, profile of a taxi driver or pizza delivery
+
+#cluster 3
+#highest trx ticket but not even 50% transactions over the median
+#so he must buy a lot (most num_trx) of little stuff and sometimes big things
+#due to the highest max_trx, it has the most outliers and he is making trx
+#at least twice as much as cluster 2 and 4 times more than cluster 1 on the 
+#weekends, so he must go on spending spree those days with high amt trx
+#profile of a wealthy person
+
+#cluster 2
+#avg ticket, avg num_trx, he buys diffent varieties of things because of
+#mode_cac other with high value and mode_merchant_other with high value, 
+#he doesnt use amazon, he doesnt spend on fuel and more than 50% of his trx
+#are on schools, middle class student profile
