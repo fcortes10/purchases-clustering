@@ -700,15 +700,296 @@ summary(dt.grouped)
 
 ### Clustering and anomalies detection
 
+Now that we have a lot more features after the feature engineering step,
+we begin with out cluster analysis.
+
 #### Number of clusters (K)
+
+First, we have to determine the optimal number of clusters.
+
+Since we have categorical and numerical features, we decided to use
+Gower’s distance approach for the distance/dissimilarity matrix.
+
+We begin by storing the key column in a vector and dropping it from the
+final dataset.
+
+``` r
+#we store the key
+key <- dt.grouped[ , CARD_NUMBER]
+dt.grouped[ , CARD_NUMBER := NULL]
+```
+
+Then we create the distance/dissimilarity matrix.
+
+``` r
+#we create a distance/dissimilarity matrix
+set.seed(100)
+gower_dist <- daisy(as.data.frame(dt.grouped),
+                    metric = "gower")
+```
+
+There are 3 common methods for determining the number of clusters:
+
+-   Elbow method  
+-   Silhouette score  
+-   Gap statistic method
+
+but the latter method can’t be performed over a gower distance matrix,
+so we will decide with the Elbow and Silhouette methods.
+
+We begin with the Elbow method.
+
+``` r
+#elbow method (within-clusters sum of squares)
+wss <- function(k, x) {
+  kmeans(x = x, k, nstart = 10)$tot.withinss
+}
+
+#number of clusters to be tested (from 1 to 7)
+k <- 1:7
+wss_val <- map_dbl(k, wss, gower_dist)
+
+#plot
+plot(k, wss_val, type = "b", pch = 19, frame = FALSE, 
+     xlab="Number of clusters K", ylab = "Total within-clusters sum of squares")
+```
+
+![](README_files/figure-gfm/elbow-1.png)<!-- -->
+
+This is just a visual method, where the optimal number of clusters is
+determined by where the inflection points are located at. In this case
+we can see a first inflection point at 2 and then at 4, so those are
+going to be our options.
+
+Then we proceed with the Silhouette method.
+
+``` r
+#silhouette method 
+silhouette_score <- function(k, x){
+  km <- kmeans(x = x, centers = k, nstart = 10)
+  ss <- silhouette(km$cluster, dist(x))
+  mean(ss[ , 3])
+}
+
+#number of clusters to be tested (from 2 to 7)
+k <- 2:7
+avg_sil <- sapply(k, silhouette_score, gower_dist)
+
+#plot
+plot(k, avg_sil, type = 'b', pch = 19, frame = FALSE,
+     xlab = 'Number of clusters K', ylab = 'Average Silhouette Scores')
+```
+
+![](README_files/figure-gfm/silhouette-1.png)<!-- -->
+
+In this method, the highest score determines the optimal value of the
+number of clusters. So here, we conclude that our first choice must be
+`K=2` and as a second choice `K=4`.
 
 ([back to index](#index))
 
 #### Clustering
 
+Then, we proceed to use `K=2` and use the K-means algorithm for
+clustering.
+
+``` r
+set.seed(1)
+#kmeans
+km <- kmeans(x = gower_dist, centers = 2)
+
+#cluster size
+km$size
+```
+
+    ## [1]  42 986
+
+``` r
+#cluster distribution
+prop.table(km$size)
+```
+
+    ## [1] 0.04085603 0.95914397
+
+Here we see that we have unbalanced clusters, probably due to anomalies
+but we are not sure yet.
+
+In order to know which variables are the most important in determining
+the cluster belonging of each client, we train a **supervised model**
+with cluster as the target. First we must convert categorical variables
+into dummies
+
+``` r
+cols.for.dummy.2 <- c('MODE_MERCHANT', 'MODE_CAC_1', 'MODE_DIRECT', 'MODE_DAY', 'MODE_MONTH')
+dt.dummies.2 <- dummy_cols(dt.grouped, select_columns = cols.for.dummy.2, remove_selected_columns = TRUE)
+```
+
+and we bind the target column, which is the cluster (1 and 2) converted
+to 0 and 1 labels.
+
+``` r
+dt.sup <- cbind(dt.dummies.2, cluster = km$cluster-1)
+```
+
+Then we train a classification model, in this case it is a binary
+classification since we have 2 clusters but in order to make it for
+general purposes (more than 2 clusters) we train a multinomial xgboost
+model. We will not go in much depth on how to build a supervised model
+because is out of the scope of this report, but the comments in the code
+can work as hints.
+
+``` r
+#number of classes
+k <- length(km$size)
+#definition of the multinomial model
+xgb_params <- list("objective" = "multi:softprob",
+                   "eval_metric" = "mlogloss",
+                   "num_class" = k)
+#number of max iterations
+nround <- 500 
+#number of folds for the cross validation
+cv.nfold <- 5
+
+#we declare the train data matrix
+train_matrix <- xgb.DMatrix(data = as.matrix(dt.sup[ , -80]), label = dt.sup$cluster)
+
+#we do a cross validation to get the best iteration parameter
+set.seed(5)
+cv_model <- xgb.cv(params = xgb_params,
+                   data = train_matrix, 
+                   nrounds = nround,
+                   nfold = cv.nfold,
+                   verbose = TRUE,
+                   prediction = TRUE,
+                   early_stopping_rounds = 10)
+```
+
+    ## [1]  train-mlogloss:0.440285+0.000297    test-mlogloss:0.443883+0.002023 
+    ## Multiple eval metrics are present. Will use test_mlogloss for early stopping.
+    ## Will train until test_mlogloss hasn't improved in 10 rounds.
+    ## 
+    ## [2]  train-mlogloss:0.300202+0.000567    test-mlogloss:0.305790+0.002417 
+    ## [3]  train-mlogloss:0.211631+0.000674    test-mlogloss:0.218832+0.003094 
+    ## [4]  train-mlogloss:0.152358+0.000673    test-mlogloss:0.160424+0.004252 
+    ## [5]  train-mlogloss:0.111178+0.000801    test-mlogloss:0.119874+0.004626 
+    ## [6]  train-mlogloss:0.082034+0.000835    test-mlogloss:0.091803+0.004818 
+    ## [7]  train-mlogloss:0.060875+0.000745    test-mlogloss:0.071335+0.005521 
+    ## [8]  train-mlogloss:0.045549+0.000630    test-mlogloss:0.056578+0.006223 
+    ## [9]  train-mlogloss:0.034309+0.000535    test-mlogloss:0.045049+0.006497 
+    ## [10] train-mlogloss:0.026182+0.000572    test-mlogloss:0.037654+0.007135 
+    ## [11] train-mlogloss:0.020133+0.000501    test-mlogloss:0.031697+0.007285 
+    ## [12] train-mlogloss:0.015590+0.000428    test-mlogloss:0.026697+0.007838 
+    ## [13] train-mlogloss:0.012225+0.000346    test-mlogloss:0.023300+0.007770 
+    ## [14] train-mlogloss:0.009758+0.000336    test-mlogloss:0.021693+0.008443 
+    ## [15] train-mlogloss:0.007872+0.000329    test-mlogloss:0.019845+0.008416 
+    ## [16] train-mlogloss:0.006468+0.000328    test-mlogloss:0.019041+0.009004 
+    ## [17] train-mlogloss:0.005410+0.000323    test-mlogloss:0.018624+0.009651 
+    ## [18] train-mlogloss:0.004609+0.000309    test-mlogloss:0.018045+0.009768 
+    ## [19] train-mlogloss:0.003991+0.000283    test-mlogloss:0.017664+0.010107 
+    ## [20] train-mlogloss:0.003553+0.000272    test-mlogloss:0.017608+0.010286 
+    ## [21] train-mlogloss:0.003193+0.000237    test-mlogloss:0.017390+0.010112 
+    ## [22] train-mlogloss:0.002903+0.000234    test-mlogloss:0.017401+0.009972 
+    ## [23] train-mlogloss:0.002684+0.000238    test-mlogloss:0.017352+0.010174 
+    ## [24] train-mlogloss:0.002481+0.000210    test-mlogloss:0.017290+0.010145 
+    ## [25] train-mlogloss:0.002335+0.000188    test-mlogloss:0.017036+0.010166 
+    ## [26] train-mlogloss:0.002225+0.000181    test-mlogloss:0.017258+0.010269 
+    ## [27] train-mlogloss:0.002113+0.000159    test-mlogloss:0.017592+0.010483 
+    ## [28] train-mlogloss:0.002033+0.000155    test-mlogloss:0.017455+0.010097 
+    ## [29] train-mlogloss:0.001966+0.000145    test-mlogloss:0.017392+0.010355 
+    ## [30] train-mlogloss:0.001913+0.000143    test-mlogloss:0.017561+0.010642 
+    ## [31] train-mlogloss:0.001864+0.000142    test-mlogloss:0.017704+0.010724 
+    ## [32] train-mlogloss:0.001822+0.000139    test-mlogloss:0.017900+0.010679 
+    ## [33] train-mlogloss:0.001784+0.000139    test-mlogloss:0.017968+0.010815 
+    ## [34] train-mlogloss:0.001750+0.000137    test-mlogloss:0.018164+0.010870 
+    ## [35] train-mlogloss:0.001718+0.000135    test-mlogloss:0.018218+0.010859 
+    ## Stopping. Best iteration:
+    ## [25] train-mlogloss:0.002335+0.000188    test-mlogloss:0.017036+0.010166
+
+``` r
+#we train the xgboost with the best number of iterations
+set.seed(10)
+bst_model <- xgb.train(params = xgb_params,
+                       data = train_matrix,
+                       nrounds = cv_model$best_iteration)
+```
+
+We now check the most important features. Since it is a tree-based
+model, the frequency of appearance of the features is a good indicator
+of the importance. We select the top 10 and plot them.
+
+``` r
+#we plot the top 10 variables
+importance <- xgb.importance(feature_names = colnames(train_matrix), model = bst_model)
+xgb.plot.importance(importance_matrix = importance, top_n = 10, measure = 'Frequency')
+```
+
+![](README_files/figure-gfm/plot_imp-1.png)<!-- -->
+
+We now get the mean of the most important features grouped by cluster in
+order to see the differences between their profiles.
+
+``` r
+#select the features
+imp_features <- c(head(importance[order(Frequency, decreasing = TRUE)], 10)[ , Feature], 'cluster')
+
+#we use these features to see what characterizes the clusters
+dt.sup[ , ..imp_features][ , lapply(.SD, mean), cluster][order(cluster)]
+```
+
+    ##    cluster PCT_CHARGEBACKS     AVG_TRX PCT_OUTLIER   PCT_OTM
+    ## 1:       0      0.80224660 16210.08608  0.83563688 0.9496613
+    ## 2:       1      0.02087404    93.49782  0.05743182 0.4933367
+    ##    AVG_AMT_CHARGEBACKS PCT_XTRM_VALUE NUM_CHARGEBACKS MODE_MONTH_5
+    ## 1:        15541.525575     0.67223841        19.66667    0.7619048
+    ## 2:            2.122971     0.02676454         1.21501    0.1338742
+    ##    PCT_TAIL_VALUE MODE_DIRECT_other
+    ## 1:     0.29830767         0.7619048
+    ## 2:     0.02376217         0.1653144
+
+We can see a lot of difference in `PCT_CHARGEBACKS`, where the cluster 0
+has more than 80% negative transactions. Also, in the `AVG_TRX`, where
+the ticket per transaction of cluster 0 is over 100 times the ticket
+from cluster 1. The `PCT_OUTLIER` indicates us that more than 80% of the
+transaction amounts of cluster 0 qualified as outliers and
+`MODE_MONTH_5` tells us that in 76% of the clients in cluster 0, the
+month with most transactions was May, which is kind of wierd to be that
+concentrated in just one month.
+
+This latter feature must be an indicator of an anomaly so we will check
+it.
+
 ([back to index](#index))
 
 #### Anomalies detection
+
+We start checking `MODE_MONTH_5`.
+
+First we get the card numbers from people that are on cluster 0 and have
+their transaction mode in May.
+
+``` r
+#card numbers from people that have their trx mode on may
+index <- which((dt.sup[ , MODE_MONTH_5] == 1) & unname(km$cluster-1 == 0))
+anomaly_card_number <- key[index]
+```
+
+Then we check what are all the transaction dates of those clients.
+
+``` r
+#transaction dates of that clients
+table(dt[CARD_NUMBER %in% anomaly_card_number, TRANS_DATE])
+```
+
+    ## 
+    ## 2017-05-08 2017-05-10 
+    ##          2         31
+
+We can see that all their transactions are just placed on May and that
+it is their only transaction in the whole year.
+
+There could be many reasons to explain this, for example it could be a
+fraud attack or maybe a promotion that happen to be on that exact date,
+but the only thing we are certain of is that it is an anomaly.
 
 ([back to index](#index))
 
