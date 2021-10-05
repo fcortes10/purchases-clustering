@@ -211,6 +211,18 @@ set.seed(100)
 gower_dist <- daisy(as.data.frame(dt.grouped),
                     metric = "gower")
 
+#elbow method
+wss <- function(k, x) {
+  kmeans(x = x, k, nstart = 10)$tot.withinss
+}
+
+k <- 1:7
+wss_val <- map_dbl(k, wss, gower_dist)
+
+plot(k, wss_val, type = "b", pch = 19, frame = FALSE, 
+     xlab="Number of clusters K", ylab = "Total within-clusters sum of squares")
+#inflection points at 2 (high) and 4 (2nd high)
+
 #silhouette method function
 silhouette_score <- function(k, x){
   km <- kmeans(x = x, centers = k, nstart = 10)
@@ -219,23 +231,9 @@ silhouette_score <- function(k, x){
 }
 k <- 2:7
 avg_sil <- sapply(k, silhouette_score, gower_dist)
-plot(k, type = 'b', avg_sil, xlab = 'Number of clusters', ylab = 'Average Silhouette Scores', frame = FALSE)
-
+plot(k, avg_sil, type = 'b', pch = 19, frame = FALSE,
+     xlab = 'Number of clusters K', ylab = 'Average Silhouette Scores')
 #peaks at 2 (high) and 4 (2nd high)
-
-#elbow method
-wss <- function(k, x) {
-  kmeans(x = x, k, nstart = 10)$tot.withinss
-}
-
-k <- 1:7
-wss_values <- map_dbl(k, wss, gower_dist)
-
-plot(k, wss_values,
-     type="b", pch = 19, frame = FALSE, 
-     xlab="Number of clusters K",
-     ylab="Total within-clusters sum of squares")
-#inflection points at 2 (high) and 4 (2nd high)
 
 #we proceed to use K=2
 km <- kmeans(x = gower_dist, centers = 2)
