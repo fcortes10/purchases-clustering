@@ -30,6 +30,16 @@ distance and is not yet well implemented in a python package. The
 mathematical definition of this distance can be found
 [here](https://statisticaloddsandends.wordpress.com/2021/02/23/what-is-gowers-distance/).
 
+------------------------------------------------------------------------
+
+## Index
+
+[1. Data reading](#data-reading)  
+[2. Data cleaning](#data-cleaning)  
+[3. Data exploration](#data-exploration)
+
+------------------------------------------------------------------------
+
 ## Let’s get started
 
 We begin by setting some global configurations and loading required
@@ -56,7 +66,7 @@ library(xgboost)
 
 ------------------------------------------------------------------------
 
-#### Data reading
+### Data reading
 
 Then we read the data structure, get all files from the `data-csv`
 folder, also
@@ -107,7 +117,7 @@ head(dt, 3)
 
 ------------------------------------------------------------------------
 
-#### Data cleaning
+### Data cleaning
 
 We apply some treatments to data in order to make it more handleable.
 This includes, converting data types, changing formats, dropping
@@ -199,7 +209,7 @@ dt[ , ORIGINAL_GROSS_AMT := as.numeric(gsub(",", "", ORIGINAL_GROSS_AMT))]
 
 ------------------------------------------------------------------------
 
-#### Data exploration
+### Data exploration
 
 For the data exploration we don’t want pretty charts yet, just see how
 the data looks. We start with out only numeric column
@@ -207,7 +217,7 @@ the data looks. We start with out only numeric column
 simplest way is plotting a histogram:
 
 ``` r
-hist(dt[ , ORIGINAL_GROSS_AMT])
+hist(dt[ , ORIGINAL_GROSS_AMT], main = "Histogram for gross amount", xlab = "Gross amount")
 ```
 
 ![](README_files/figure-gfm/histogram-1.png)<!-- -->
@@ -217,13 +227,19 @@ data. So we limit our graph to be between the quantiles 5% and 95%
 
 ``` r
 ext_q <- quantile(dt[ , ORIGINAL_GROSS_AMT], probs = c(0.05, 0.95))
-hist(dt[between(ORIGINAL_GROSS_AMT, ext_q[1], ext_q[2]), ORIGINAL_GROSS_AMT])
+hist(dt[between(ORIGINAL_GROSS_AMT, ext_q[1], ext_q[2]), ORIGINAL_GROSS_AMT], 
+     main = "Histogram for gross amount (without tail values)", xlab = "Gross amount")
 ```
 
 ![](README_files/figure-gfm/quantiles_hist-1.png)<!-- -->
 
+We can see a right skewed distribution, similar to a decaying
+exponential.
+
+Now we will explore the categorical columns by checking the number of
+distinct values in each variable.
+
 ``` r
-#exploring number of distinct values in each column
 #we declare a function for unique values
 f <- function(x){
   length(unique(x))
@@ -238,17 +254,21 @@ apply(dt, MARGIN = 2, f)
     ##   TRANS_CAC_DESC_1   TRANS_CAC_DESC_2        DIRECTORATE 
     ##                125                888                 13
 
-``` r
-#we see that 
-#we have 370 different days with transactions
-#18083 different monetary amounts in transactions
-#6268 different merchants
-#1028 different card numbers (assuming 1028 different clients)
-#125 grouped type of business according to desc 1
-#888 grouped type of business according to desc 2
-#13 grouped type of business according to directorate
+We see that we have:
 
-#we show the 20 most frequent desc 2
+-   `370` distinct days with transactions
+-   `18,083` distinct monetary amounts in transactions
+-   `6,268` distinct merchant
+-   `1,028` distinct card numbers (and we can assume `1,028` distinct
+    clients)
+-   `125` distinct type of business according to `DESC_1`
+-   `888` distinct type of business according to `DESC_2`
+-   `13` distinct type of business according to `DIRECTORATE`
+
+We start with `TRANS_CAC_DESC_2` and show the 20 most frequent
+categories:
+
+``` r
 head(dt[ , .N, TRANS_CAC_DESC_2][order(N, decreasing = TRUE)], 20)
 ```
 
@@ -274,11 +294,17 @@ head(dt[ , .N, TRANS_CAC_DESC_2][order(N, decreasing = TRUE)], 20)
     ## 19:                                 Uffculme  309
     ## 20: International School & Community College  306
 
-``` r
-#we see that it is somehow related to institutions or schools but since we got no metadata and the are 88 categories we chose to drop it
-dt[ , TRANS_CAC_DESC_2 := NULL]
+where we can see that it is somehow related to institutions or schools
+but since we got no metadata and the are 88 categories we chose to drop
+it.
 
-#we show the 20 most frequent merchant names
+``` r
+dt[ , TRANS_CAC_DESC_2 := NULL]
+```
+
+Then, we continue with the 20 most frequent `MERCHANT_NAME`
+
+``` r
 head(dt[ , .N, MERCHANT_NAME][order(N, decreasing = TRUE)], 20)
 ```
 
