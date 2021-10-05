@@ -933,18 +933,15 @@ order to see the differences between their profiles.
 imp_features <- c(head(importance[order(Frequency, decreasing = TRUE)], 10)[ , Feature], 'cluster')
 
 #we use these features to see what characterizes the clusters
-dt.sup[ , ..imp_features][ , lapply(.SD, mean), cluster][order(cluster)]
+round(dt.sup[ , ..imp_features][ , lapply(.SD, mean), cluster][order(cluster)], 2)
 ```
 
-    ##    cluster PCT_CHARGEBACKS     AVG_TRX PCT_OUTLIER   PCT_OTM
-    ## 1:       0      0.80224660 16210.08608  0.83563688 0.9496613
-    ## 2:       1      0.02087404    93.49782  0.05743182 0.4933367
-    ##    AVG_AMT_CHARGEBACKS PCT_XTRM_VALUE NUM_CHARGEBACKS MODE_MONTH_5
-    ## 1:        15541.525575     0.67223841        19.66667    0.7619048
-    ## 2:            2.122971     0.02676454         1.21501    0.1338742
-    ##    PCT_TAIL_VALUE MODE_DIRECT_other
-    ## 1:     0.29830767         0.7619048
-    ## 2:     0.02376217         0.1653144
+    ##    cluster PCT_CHARGEBACKS  AVG_TRX PCT_OUTLIER PCT_OTM AVG_AMT_CHARGEBACKS
+    ## 1:       0            0.80 16210.09        0.84    0.95            15541.53
+    ## 2:       1            0.02    93.50        0.06    0.49                2.12
+    ##    PCT_XTRM_VALUE NUM_CHARGEBACKS MODE_MONTH_5 PCT_TAIL_VALUE MODE_DIRECT_other
+    ## 1:           0.67           19.67         0.76           0.30              0.76
+    ## 2:           0.03            1.22         0.13           0.02              0.17
 
 We can see a lot of difference in `PCT_CHARGEBACKS`, where the cluster 0
 has more than 80% negative transactions. Also, in the `AVG_TRX`, where
@@ -989,20 +986,213 @@ it is their only transaction in the whole year.
 
 There could be many reasons to explain this, for example it could be a
 fraud attack or maybe a promotion that happen to be on that exact date,
-but the only thing we are certain of is that it is an anomaly.
+but the only thing we are certain of is that it is an **anomaly**.
 
 ([back to index](#index))
 
 #### New number of clusters (K)
 
+Since this anomaly affect the clustering we were trying to make, we take
+them off and start over. It should be easy, just replicate the code from
+above but without the anomalies cluster.
+
+We remove the observations from cluster 0.
+
+``` r
+dt.grouped.2 <- dt.grouped[km$cluster-1 != 0]
+```
+
+Then we create the distance/dissimilarity matrix.
+
+``` r
+#we create a distance/dissimilarity matrix
+set.seed(100)
+gower_dist.2 <- daisy(as.data.frame(dt.grouped.2),
+                      metric = "gower")
+```
+
+We proceed with the Elbow method.
+
+``` r
+#number of clusters to be tested (from 1 to 7)
+k <- 1:7
+wss_val <- map_dbl(k, wss, gower_dist.2)
+
+#plot
+plot(k, wss_val, type = "b", pch = 19, frame = FALSE, 
+     xlab="Number of clusters K", ylab = "Total within-clusters sum of squares")
+```
+
+![](README_files/figure-gfm/elbow_2-1.png)<!-- -->
+
+We can see now that the inflection point is at `K=3`.
+
+Now we proceed with the Silhouette method.
+
+``` r
+#number of clusters to be tested (from 2 to 7)
+k <- 2:7
+avg_sil <- sapply(k, silhouette_score, gower_dist.2)
+
+#plot
+plot(k, avg_sil, type = 'b', pch = 19, frame = FALSE,
+     xlab = 'Number of clusters K', ylab = 'Average Silhouette Scores')
+```
+
+![](README_files/figure-gfm/silhouette_2-1.png)<!-- -->
+
+The higher value is at `K=2` and the second at `K=3`. But since we are
+combining this method with the Elbow method, our final choice will be
+now `K=3`. We must see that this option is equal to have tried `K=4` in
+the first iteration without dropping the anomalies and both method
+pointed as second high `K=4` before.
+
 ([back to index](#index))
 
 #### New clustering
+
+We proceed with `K=3`
+
+``` r
+set.seed(1)
+#kmeans
+km <- kmeans(x = gower_dist.2, centers = 3)
+
+#cluster size
+km$size
+```
+
+    ## [1] 175 538 273
+
+``` r
+#cluster distribution
+prop.table(km$size)
+```
+
+    ## [1] 0.1774848 0.5456389 0.2768763
+
+Now the clusters are more balanced, probably indicating distinct
+identified profiles.
+
+We train the supervised model to get the most important features for the
+cluster belonging of the clients.
+
+``` r
+cols.for.dummy.2 <- c('MODE_MERCHANT', 'MODE_CAC_1', 'MODE_DIRECT', 'MODE_DAY', 'MODE_MONTH')
+dt.dummies.2 <- dummy_cols(dt.grouped.2, select_columns = cols.for.dummy.2, remove_selected_columns = TRUE)
+
+#we bind the "target" column which is the cluster (1, 2 and 3) converted to 0, 1 and 2
+dt.sup <- cbind(dt.dummies.2, cluster = km$cluster-1)
+
+#number of classes
+k <- length(km$size)
+#definition of the multinomial model
+xgb_params <- list("objective" = "multi:softprob",
+                   "eval_metric" = "mlogloss",
+                   "num_class" = k)
+#number of max iterations
+nround <- 500 
+#number of folds for the cross validation
+cv.nfold <- 5
+
+#we declare the train data matrix
+train_matrix <- xgb.DMatrix(data = as.matrix(dt.sup[ , -80]), label = dt.sup$cluster)
+
+#we do a cross validation to get the best iteration parameter
+set.seed(5)
+cv_model <- xgb.cv(params = xgb_params,
+                   data = train_matrix, 
+                   nrounds = nround,
+                   nfold = cv.nfold,
+                   verbose = FALSE,
+                   prediction = TRUE,
+                   early_stopping_rounds = 10)
+
+#we train the xgboost with the best number of iterations
+set.seed(10)
+bst_model <- xgb.train(params = xgb_params,
+                       data = train_matrix,
+                       nrounds = cv_model$best_iteration)
+```
+
+Now we plot the 15 most important variables.
+
+``` r
+#we plot the top 15 variables
+importance <- xgb.importance(feature_names = colnames(train_matrix), model = bst_model)
+xgb.plot.importance(importance_matrix = importance, top_n = 15, measure = 'Frequency')
+```
+
+![](README_files/figure-gfm/plot_imp_2-1.png)<!-- -->
+
+We now get the mean of the most important features grouped by cluster in
+order to see the differences between their profiles.
+
+``` r
+#select the features
+imp_features <- c(head(importance[order(Frequency, decreasing = TRUE)], 15)[ , Feature], 'cluster')
+
+#we use these features to see what characterizes the clusters
+round(dt.sup[ , ..imp_features][ , lapply(.SD, mean), cluster][order(cluster)], 2)
+```
+
+    ##    cluster PCT_PAYDAY_TRX MODE_DIRECT_CYP&F SCHOOLS AVG_TRX PCT_OTM NUM_TRX
+    ## 1:       0           0.27                      0.43  178.41    0.46   76.59
+    ## 2:       1           0.23                      0.55   82.25    0.43   50.87
+    ## 3:       2           0.23                      0.04   61.24    0.63   21.15
+    ##    MODE_CAC_1_other MODE_MERCHANT_other MAX_TRX NUM_PAYDAY_TRX NUM_OTM
+    ## 1:             0.47                0.37 3262.02          18.29   31.32
+    ## 2:             0.77                0.97  498.84          11.91   21.49
+    ## 3:             0.01                0.99  144.80           5.22   13.53
+    ##    PCT_OUTLIER PCT_WEEKEND_TRX PCT_TAIL_VALUE AVG_AMT_CHARGEBACKS
+    ## 1:        0.13            0.12           0.05                7.66
+    ## 2:        0.06            0.06           0.02                1.34
+    ## 3:        0.01            0.03           0.01                0.11
+    ##    MODE_CAC_1_Vehicle Fuel
+    ## 1:                    0.01
+    ## 2:                    0.01
+    ## 3:                    0.77
 
 ([back to index](#index))
 
 ------------------------------------------------------------------------
 
 ### Interpretation and conclusions
+
+We have 3 clusters and the means of the important features. We can now
+characterize those clusters into profiles to take any kind of further
+action or just to understand the types of population inside our data.
+
+Let’s begin with cluster 2:
+
+> this cluster has steady transactions (almost no outliers) and 63% of
+> its transactions are over the median but it also has the lowest avg
+> ticket of the 3 groups, so it has steady over the median comsuptions
+> without any high volume transaction. Also, it doesn’t have a high
+> amount of transactions and 77% of them are on vehicle fuel. No amount
+> spent in education. This profile looks like a taxi driver, pizza
+> delivery or low-middle income person that uses his car to work.
+
+Then, for cluster 0:
+
+> this cluster has the highest transaction ticket but not even 50% of
+> them are over the median, so they must buy a lot (most number of
+> transactions) of little stuff and sometimes big things due to the
+> highest MAX\_TRX. It has the most outliers and they are making
+> transactions at least twice as much as cluster 1 and 4 times more than
+> cluster 2 on the weekends, so they must be going on spending spree
+> those days with high volume transactions. This profile looks like a
+> wealthy person.
+
+Finally, for cluster 1:
+
+> this cluster has an average transaction ticket and an average number
+> of transactions. They buy distinct varieties of things because of
+> MODE\_CAC\_other and MODE\_MERCHANT\_other with high values. They
+> don’t use amazon and don’t spend on fuel. More than 50% of their
+> transactions are on school. This profile looks like a middle class
+> student.
+
+If you got this far, I hope you enjoyed it.
 
 ([back to index](#index))
