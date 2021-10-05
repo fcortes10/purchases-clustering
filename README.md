@@ -1,12 +1,3 @@
-
-<style type="text/css">
-.main-container {
-  max-width: 1800px;
-  margin-left: auto;
-  margin-right: auto;
-}
-</style>
-
 ------------------------------------------------------------------------
 
 > This report is just for academical purposes
