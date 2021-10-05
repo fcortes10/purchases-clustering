@@ -2,6 +2,14 @@
 output: rmarkdown::github_document
 ---
 
+<style type="text/css">
+.main-container {
+  max-width: 1800px;
+  margin-left: auto;
+  margin-right: auto;
+}
+</style>
+
 ```{r setup, include=FALSE}
 knitr::opts_chunk$set(echo = TRUE)
 ```
@@ -26,9 +34,10 @@ We chose to approach this problem with `R` instead of `python` because the most 
 
 We begin by setting some global configurations and loading required packages. For installing the ones you don't have run `install.packages("package-name")` in the R console.
 
-```{r config-packages, message=FALSE, cache=TRUE, results='hide'}
+```{r config-packages, message=FALSE, cache=FALSE, results='hide'}
 Sys.setlocale("LC_TIME", "C")
 
+library(knitr)
 library(data.table)
 library(plyr)
 library(readr)
@@ -48,7 +57,7 @@ library(xgboost)
 
 Then we read the data structure, get all files from the `data-csv` folder, also [here](https://github.com/fcortes10/purchases-clustering/tree/main/data-csv), standardize column names and append all datasets into a big one called `dt`.
 
-```{r data reading, message=FALSE, cache=TRUE, results='hide'}
+```{r data reading, message=FALSE, cache=FALSE, results='hide'}
 #reading structure from data
 dt <- fread('data-csv/purchase-card-transactions-201612.csv', nrows = 0)
 
@@ -69,12 +78,21 @@ rm(list.dt, files, column.names)
 gc()
 ```
 
+Now we can have an overview of how the dataset looks like (just the 3 first rows)
+
+```{r data_head, cache=FALSE}
+head(dt, 3)
+```
+
+
 ***
 #### Data cleaning
 
-```{r data cleaning, cache=TRUE}
+We apply some treatments to data in order to make it more handleable. This includes, converting data types, changing formats, dropping columns, cleaning missing values, etc.
+
+```{r data_cleaning_1}
 #data cleaning
-#extract just the numeric part from the card number as key
+#extract just the numeric part from the card number as key (leaving it as string)
 dt[ , CARD_NUMBER := str_pad(parse_number(dt[ , CARD_NUMBER]), width = 4, side = 'left', pad = "0")]
 
 #transform the transaction date from string to date format
@@ -85,30 +103,55 @@ dt[ , c("TRANS_CAC_CODE_1", "TRANS_CAC_CODE_2", "TRANS_CAC_CODE_3") := NULL]
 
 #dropping TRANS_VAT_DESC because there is not metadata and we cannot infer its meaning
 dt[ , TRANS_VAT_DESC := NULL]
+```
 
-#summary
+We get a brief summary of the data to see any pattern or issue
+
+```{r summary}
 summary(dt)
+```
 
-#just 1 NA's in TRANS_DATE, so we remove it
+The first variable we can see is `TRANS_DATE`, which has only one `NA`, so we remove it.
+
+```{r drop_na}
 dt <- dt[!is.na(TRANS_DATE)]
+```
 
-#original_gross_amt is a character column, we cast it as numeric
-as.numeric(dt[ , ORIGINAL_GROSS_AMT])
+We also see that `ORIGINAL_GROSS_AMT` is a character column when it must be numeric. We cast it as numeric.
 
-#it warns as it has introduced NAs so something must be happening, we check the nans
-dt[which(is.na(as.numeric(dt[ , ORIGINAL_GROSS_AMT])))]
+```{r cast_numeric_warning}
+head(as.numeric(dt[ , ORIGINAL_GROSS_AMT]))
+```
 
+where we get a warning of induced `NAs`, so something must be happening. Checking the `NAs`
+
+```{r na_check}
+head(dt[which(is.na(as.numeric(dt[ , ORIGINAL_GROSS_AMT])))], 3)
+```
+
+we can see it is the thousands separator. So we replace the character `","` in the string and cast again.
+
+```{r cast_numeric}
 #it is the thousands separator, we replace it and cast again as numeric
 dt[ , ORIGINAL_GROSS_AMT := as.numeric(gsub(",", "", ORIGINAL_GROSS_AMT))]
+```
 
-##data exploration
-#we explore our only numeric variable
+***
+#### Data exploration
+
+For the data exploration we don't want pretty charts yet, just see how the data looks. We start with out only numeric column `ORIGINAL_GROSS_AMT`. To explore a univariate numeric variable, the simplest way is plotting a histogram:
+
+```{r histogram}
 hist(dt[ , ORIGINAL_GROSS_AMT])
+```
 
-#we see that we got outliers, so we limit our graph on the quantiles 1% and 99% (extreme values)
-ext_q <- quantile(dt[ , ORIGINAL_GROSS_AMT], probs = c(0.01, 0.99))
+where we see that we got outliers that doesn't let us see clearly our data. So we limit our graph to be between the quantiles 5% and 95%
+```{r quantiles_hist}
+ext_q <- quantile(dt[ , ORIGINAL_GROSS_AMT], probs = c(0.05, 0.95))
 hist(dt[between(ORIGINAL_GROSS_AMT, ext_q[1], ext_q[2]), ORIGINAL_GROSS_AMT])
+```
 
+```{r}
 #exploring number of distinct values in each column
 #we declare a function for unique values
 f <- function(x){
